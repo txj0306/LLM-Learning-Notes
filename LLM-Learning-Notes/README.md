@@ -1,16 +1,6 @@
 一、文件定位
 
-nanovllm/
-├── engine/
-│   ├── block_manager.py   # Block 分配与回收、Prefix Caching
-│   ├── sequence.py        # Sequence 数据结构（含 block_table）
-│   ├── scheduler.py       # 调度器（调用 BlockManager）
-│   └── model_runner.py    # KV Cache 物理显存分配、上下文准备
-├── layers/
-│   └── attention.py       # Attention 计算 + KV Cache 存取
-├── utils/
-│   └── context.py         # 运行时上下文（slot_mapping、block_tables等）
-└── config.py              # kvcache_block_size 等配置
+![alt text](image.png)
 
  1.1模块协作关系图
 <img width="960" height="569" alt="image" src="https://github.com/user-attachments/assets/cef26016-b1b8-4f88-9978-28a7abe4cb39" />
@@ -67,14 +57,14 @@ kv catch：是缓存
 2.2 Attention 层的 KV Cache 操作 nanovllm/layers/attention.py
 
 模式 A：笨蛋模式（没有 KV Cache）
-生成第 1 个字：计算 100 个词的 KV。
-生成第 2 个字：计算 101 个词的 KV。
-生成第 3 个字：计算 102 个词的 KV。
-结果：计算量是 O(N^2)。当你聊到 2000 字时，显卡就得为了吐出一个字而计算几百万次，这种重复劳动会直接让显卡冒烟。
+-生成第 1 个字：计算 100 个词的 KV。
+-生成第 2 个字：计算 101 个词的 KV。
+-生成第 3 个字：计算 102 个词的 KV。
+-结果：计算量是 O(N^2)。当你聊到 2000 字时，显卡就得为了吐出一个字而计算几百万次，这种重复劳动会直接让显卡冒烟。
 
 模式 B：天才模式（带 KV Cache）
-Prefill：一次性算出前 100 个词的 KV，存进仓库。
-Decode：吐第 1 个字时，只算这 1 个字的 KV，加上仓库里的 100 个。
-Decode：吐第 2 个字时，只算这 1 个字的 KV，加上仓库里的 101 个。结果：每一轮的计算量几乎是恒定的（只算当前最新的Q, K, V）。
+-Prefill：一次性算出前 100 个词的 KV，存进仓库。
+-Decode：吐第 1 个字时，只算这 1 个字的 KV，加上仓库里的 100 个。
+-Decode：吐第 2 个字时，只算这 1 个字的 KV，加上仓库里的 101 个。结果：每一轮的计算量几乎是恒定的（只算当前最新的Q, K, V）。
 
 2.3 Block 类 nanovllm/engine/block_manager.py
