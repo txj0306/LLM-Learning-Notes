@@ -98,27 +98,66 @@ class ModelRunner:
         torch.cuda.empty_cache()
 
     def allocate_kv_cache(self):
+        """
+        分配 KV Cache 的 GPU 显存。
+
+        根据可用显存自动计算可分配的 Block 数量，
+        然后预分配一个大的 Tensor 作为所有 Block 的存储。
+
+        调用时机：ModelRunner 初始化时，模型加载后
+        """
         config = self.config
         hf_config = config.hf_config
+
+        # 1. 获取 GPU 显存信息
         free, total = torch.cuda.mem_get_info()
         used = total - free
+        # peak: 模型加载和预热过程中的峰值显存
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        # current: 当前已分配的显存
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+
+        # 2. 计算单个 Block 的显存占用
+        # 考虑张量并行：每个 GPU 只存储部分 KV 头
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
-        config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
-        assert config.num_kvcache_blocks > 0
-        self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
+        block_bytes = (2 *                              # K 和 V
+                    hf_config.num_hidden_layers *    # 层数（如 28）
+                    self.block_size *                # block_size（如 256）
+                    num_kv_heads *                   # KV 头数（如 8）
+                    hf_config.head_dim *             # 头维度（如 128）
+                    hf_config.torch_dtype.itemsize)  # 数据类型大小（如 2 for bf16）
+
+        # 3. 计算可分配的 Block 数量
+        # 可用显存 = 总显存 × 利用率 - 已用 - (峰值 - 当前)
+        available = total * config.gpu_memory_utilization - used - peak + current
+        config.num_kvcache_blocks = int(available) // block_bytes
+        assert config.num_kvcache_blocks > 0, "Not enough GPU memory for KV Cache"
+
+        # 4. 预分配 KV Cache Tensor
+        # 形状: [2, num_layers, num_blocks, block_size, num_kv_heads, head_dim]
+        self.kv_cache = torch.empty(
+            2,                              # 0: Key, 1: Value
+            hf_config.num_hidden_layers,    # 层数
+            config.num_kvcache_blocks,      # Block 数量
+            self.block_size,                # 每个 Block 的 token 数
+            num_kv_heads,                   # KV 头数
+            hf_config.head_dim              # 头维度
+        )
+
+        # 5. 将 KV Cache 切片绑定到每个 Attention 层
+        # 每层获得 [num_blocks, block_size, num_kv_heads, head_dim] 的视图
+        #张量形状是[2, num_layers, num_blocks, num_heads, block_size, head_dim]
         layer_id = 0
         for module in self.model.modules():
             if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
-                module.k_cache = self.kv_cache[0, layer_id]
-                module.v_cache = self.kv_cache[1, layer_id]
+                module.k_cache = self.kv_cache[0, layer_id]  # 该层的 K Cache
+                module.v_cache = self.kv_cache[1, layer_id]  # 该层的 V Cache
                 layer_id += 1
+
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)
+        #补齐缺口用-1
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
@@ -126,7 +165,7 @@ class ModelRunner:
     def prepare_prefill(self, seqs: list[Sequence]):
         input_ids = []
         positions = []
-        cu_seqlens_q = [0]
+        cu_seqlens_q = [0]#隔离从哪到哪是一段
         cu_seqlens_k = [0]
         max_seqlen_q = 0
         max_seqlen_k = 0
@@ -136,9 +175,9 @@ class ModelRunner:
             seqlen = len(seq)
             input_ids.extend(seq[seq.num_cached_tokens:])
             positions.extend(list(range(seq.num_cached_tokens, seqlen)))
-            seqlen_q = seqlen - seq.num_cached_tokens
-            seqlen_k = seqlen
-            cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
+            seqlen_q = seqlen - seq.num_cached_tokens#只算新词q
+            seqlen_k = seqlen#新词能看到所有的k
+            cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)# GPU 看到 [0, 10, 30] 就知道：0-10 是第一个人的，10-30 是第二个人的。防止不同人的数据算混了。
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)

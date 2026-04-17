@@ -99,7 +99,7 @@ class BlockManager:
         """
         h = xxhash.xxh64()
         if prefix != -1:
-            # 将前缀 hash 纳入计算，实现链式依赖
+            # 将前缀 hash 纳入计算，实现链式依赖   h.update多次调用将词融合在一块
             h.update(prefix.to_bytes(8, "little"))
         h.update(np.array(token_ids).tobytes())
         return h.intdigest()
@@ -111,8 +111,8 @@ class BlockManager:
         block = self.blocks[block_id]
         assert block.ref_count == 0  # 确保 Block 确实是空闲的
         block.reset()                # 重置状态
-        self.free_block_ids.remove(block_id)
-        self.used_block_ids.add(block_id)
+        self.free_block_ids.remove(block_id)#把block_id从空闲池中移除
+        self.used_block_ids.add(block_id)#在已使用集合中添加block_id
         return self.blocks[block_id]
 
     def _deallocate_block(self, block_id: int) -> Block:
