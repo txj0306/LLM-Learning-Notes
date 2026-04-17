@@ -90,14 +90,13 @@ kv catch：是缓存
 ![alt text](image-4.png)
 
 - ### 2.5 KV Cache 物理存储 nanovllm/engine/model_runner.py
-一个 Block 实际上存储了block_size个Token ,每个token又包含Layer（层数）个Layer，每层Layer又包含Heads（头数）个Head，每个Heads又包含一组kv。
-- 第一层级：Block（显存的最小分配单位）
--  第二层级：Layers（这块显存必须预留出所有层的空间）
--    第三层级：KV 对（每个位置都有 K 和 V）
--      第四层级：Heads（每个 KV 对里有 8 个头）
--        第五层级：Slots（每个头能装 block_size 个 Token）
--          第六层级：Head Dim（每个 Token 的向量维度，如 128）
--            
+* **第一层级：Block**（显存的最小分配单位）
+    * **第二层级：Layers**（这块显存必须预留出所有层的空间）
+        * **第三层级：KV 对**（每个位置都有 K 和 V）
+            * **第四层级：Heads**（每个 KV 对里有 8 个头）
+                * **第五层级：Slots**（每个头能装 block_size 个 Token）
+                    * **第六层级：Head Dim**（每个 Token 的向量维度，如 128）
+-           
 - Token 在 Attention 里是被拆分给头的。
 
 - 一个 Token 被劈成了 Heads份。
@@ -106,7 +105,7 @@ kv catch：是缓存
 
 - 所以 一个 Block 的每个头，都得负责存这 block_size 个 Token 拆出来的其中一份。
 
-- **多头注意力**
+- ## 2.6多头注意力
 - 举例8个头的情况
 1. 数据* [权重1 + 权重2 + ... + 权重8]（这是一个巨大的矩阵，只需算 1 次）。
 2. 假设你的隐藏层维度是 128：计算得到一个长度为 128*8 = 1024的长向量。代码里执行 view(batch, seq_len, 8, 128)。结果：这个长向量被逻辑上切成了 8 段，每段 128 维。
